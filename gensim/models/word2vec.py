@@ -155,15 +155,23 @@ except ImportError:
         for sentence in sentences:
             word_vocabs = [model.wv.vocab[w] for w in sentence if w in model.wv.vocab and
                            model.wv.vocab[w].sample_int > model.random.rand() * 2**32]
+            sentence_end = len(word_vocabs)
             for pos, word in enumerate(word_vocabs):
                 reduced_window = model.random.randint(model.window)  # `b` in the original word2vec code
 
                 # now go over all words from the (reduced) window, predicting each one in turn
                 start = max(0, pos - model.window + reduced_window)
-                for pos2, word2 in enumerate(word_vocabs[start:(pos + model.window + 1 - reduced_window)], start):
-                    # don't train on the `word` itself
-                    if pos2 != pos:
-                        train_sg_pair(model, model.wv.index2word[word.index], word2.index, alpha)
+                for n in range(1,model.max_ngram+1):
+                    if pos+n > sentence_end:
+                        break
+                    if n > 1:
+                        word = '_'.join(word_vocabs[start:start+n]) # make ngram
+                    end = pos + model.window + 1 - reduced_window + n - 1 # extend end window
+                    word_window = word_vocabs[start:end]
+                    for pos2, word2 in enumerate(word_window, start):
+                        # don't train on the `word` itself
+                        if pos2 in range(pos,pos+n): # account for multiple words in ngram
+                            train_sg_pair(model, model.wv.index2word[word.index], word2.index, alpha)
             result += len(word_vocabs)
         return result
 
@@ -365,7 +373,8 @@ class Word2Vec(utils.SaveLoad):
             self, sentences=None, size=100, alpha=0.025, window=5, min_count=5,
             max_vocab_size=None, sample=1e-3, seed=1, workers=3, min_alpha=0.0001,
             sg=0, hs=0, negative=5, cbow_mean=1, hashfxn=hash, iter=5, null_word=0,
-            trim_rule=None, sorted_vocab=1, batch_words=MAX_WORDS_IN_BATCH):
+            trim_rule=None, sorted_vocab=1, batch_words=MAX_WORDS_IN_BATCH,
+            max_ngram=1):
         """
         Initialize the model from an iterable of `sentences`. Each sentence is a
         list of words (unicode strings) that will be used for training.
@@ -471,6 +480,7 @@ class Word2Vec(utils.SaveLoad):
         self.sorted_vocab = sorted_vocab
         self.batch_words = batch_words
         self.model_trimmed_post_training = False
+        self.max_ngram = max_ngram
         if sentences is not None:
             if isinstance(sentences, GeneratorType):
                 raise TypeError("You can't pass a generator as the sentences argument. Try an iterator.")
@@ -571,8 +581,16 @@ class Word2Vec(utils.SaveLoad):
             if sentence_no % progress_per == 0:
                 logger.info("PROGRESS: at sentence #%i, processed %i words, keeping %i word types",
                             sentence_no, sum(itervalues(vocab)) + total_words, len(vocab))
-            for word in sentence:
-                vocab[word] += 1
+            sentence_end = len(sentence)            
+            for i, word in enumerate(sentence):                
+                for n in range(1,self.max_ngram+1):
+                    #print(n)
+                    if i+n > sentence_end:
+                        break
+                    if n > 1:
+                        word = '_'.join(sentence[i:i+n])
+                        #print(word)
+                    vocab[word] += 1
 
             if self.max_vocab_size and len(vocab) > self.max_vocab_size:
                 total_words += utils.prune_vocab(vocab, min_reduce, trim_rule=trim_rule)
