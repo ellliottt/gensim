@@ -254,7 +254,7 @@ cdef unsigned long long fast_sentence_cbow_neg(
     return next_random
 
 
-def train_batch_sg(model, sentences, alpha, _work):
+def train_batch_sg(model, sentences, alpha, _work): 
     cdef int hs = model.hs
     cdef int negative = model.negative
     cdef int sample = (model.sample != 0)
@@ -266,7 +266,8 @@ def train_batch_sg(model, sentences, alpha, _work):
     cdef int size = model.layer1_size
 
     cdef int codelens[MAX_SENTENCE_LEN]
-    cdef np.uint32_t indexes[MAX_SENTENCE_LEN]
+    #cdef np.uint32_t indexes[MAX_SENTENCE_LEN]
+    cdef np.uint32_t indexes[model.max_ngram][MAX_SENTENCE_LEN] # indexes now has an element for each n-gram length
     cdef np.uint32_t reduced_windows[MAX_SENTENCE_LEN]
     cdef int sentence_idx[MAX_SENTENCE_LEN + 1]
     cdef int window = model.window
@@ -306,13 +307,20 @@ def train_batch_sg(model, sentences, alpha, _work):
     for sent in sentences:
         if not sent:
             continue  # ignore empty sentences; leave effective_sentences unchanged
-        for token in sent:
+        for i, token in enumerate(sent): # added enumerate here to allow for n-grams
             word = vlookup[token] if token in vlookup else None
             if word is None:
                 continue  # leaving `effective_words` unchanged = shortening the sentence = expanding the window
             if sample and word.sample_int < random_int32(&next_random):
-                continue
-            indexes[effective_words] = word.index
+                continue # negative sampling noise
+            indexes[0][effective_words] = word.index # single word index (old functionality) 
+            for n in range(2,model.max_ngram+1): # add n-gram indexes
+                tokens = sent[i:i+n] # get set of tokens
+                ngram = '_'.join(tokens) # join ngram
+                if ngram in vlookup:                    
+                    indexes[n-1][effective_words] = ngram.index # fill in indexes if ngram is in vocabulary
+                else:
+                    indexes[n-1][effective_words] = None
             if hs:
                 codelens[effective_words] = <int>len(word.code)
                 codes[effective_words] = <np.uint8_t *>np.PyArray_DATA(word.code)
@@ -337,22 +345,41 @@ def train_batch_sg(model, sentences, alpha, _work):
     # release GIL & train on all sentences
     with nogil:
         for sent_idx in range(effective_sentences):
-            idx_start = sentence_idx[sent_idx]
-            idx_end = sentence_idx[sent_idx + 1]
+            # sent_idx = *new* index
+            idx_start = sentence_idx[sent_idx] # start index of the original sentence
+            idx_end = sentence_idx[sent_idx + 1] # end index of the original sentence
             for i in range(idx_start, idx_end):
-                j = i - window + reduced_windows[i]
-                if j < idx_start:
-                    j = idx_start
-                k = i + window + 1 - reduced_windows[i]
-                if k > idx_end:
-                    k = idx_end
-                for j in range(j, k):
-                    if j == i:
+                for n in range(1,model.max_ngram+1):
+                    if i + n > idx_end: # break if n-gram extends past end of sentence
+                        break
+                    if indexes[n-1][i] is None: # allow for n-grams that are not in vocab
                         continue
-                    if hs:
-                        fast_sentence_sg_hs(points[i], codes[i], codelens[i], syn0, syn1, size, indexes[j], _alpha, work, word_locks)
-                    if negative:
-                        next_random = fast_sentence_sg_neg(negative, cum_table, cum_table_len, syn0, syn1neg, size, indexes[i], indexes[j], _alpha, work, next_random, word_locks)
+                    j = i - window + reduced_windows[i]
+                    if j < idx_start:
+                        j = idx_start
+                    #k = i + window + 1 - reduced_windows[i]
+                    k = i + window + n - reduced_windows[i] # push context to the right for n-grams
+                    if k > idx_end:
+                        k = idx_end
+                    for l in range(j, k):
+                        #if l == i:
+                        if l in range(i, i+n):
+                            continue
+                        if hs:
+                            fast_sentence_sg_hs(points[i], codes[i], codelens[i], syn0, syn1, size, indexes[l], _alpha, work, word_locks)
+                        if negative:
+                            next_random = fast_sentence_sg_neg(negative, 
+                                                               cum_table, 
+                                                               cum_table_len, 
+                                                               syn0, 
+                                                               syn1neg, 
+                                                               size, 
+                                                               indexes[n-1][i], # word id for this word
+                                                               indexes[1][l], # word id for target in context (use one-gram indexes)
+                                                               _alpha, 
+                                                               work, 
+                                                               next_random, 
+                                                               word_locks)
 
     return effective_words
 
