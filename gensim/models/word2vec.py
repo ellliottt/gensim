@@ -132,6 +132,7 @@ from scipy import stats
 logger = logging.getLogger(__name__)
 
 try:
+    raise ImportError
     from gensim.models.word2vec_inner import train_batch_sg, train_batch_cbow
     from gensim.models.word2vec_inner import score_sentence_sg, score_sentence_cbow
     from gensim.models.word2vec_inner import FAST_VERSION, MAX_WORDS_IN_BATCH
@@ -153,8 +154,9 @@ except ImportError:
         """
         result = 0
         for sentence in sentences:
-            word_vocabs = [model.wv.vocab[w] for w in sentence if w in model.wv.vocab and
+            words = [w for w in sentence if w in model.wv.vocab and
                            model.wv.vocab[w].sample_int > model.random.rand() * 2**32]
+            word_vocabs = [model.wv.vocab[w] for w in words]
             sentence_end = len(word_vocabs)
             for pos, word in enumerate(word_vocabs):
                 reduced_window = model.random.randint(model.window)  # `b` in the original word2vec code
@@ -165,12 +167,17 @@ except ImportError:
                     if pos+n > sentence_end:
                         break
                     if n > 1:
-                        word = '_'.join(word_vocabs[start:start+n]) # make ngram
+                        str_word = '_'.join(words[start:start+n]) # make ngram
+                        if str_word in model.wv.vocab: # check if its in vocab
+                            word =  model.wv.vocab[str_word] 
+                        else:
+                            continue # if not, continue
                     end = pos + model.window + 1 - reduced_window + n - 1 # extend end window
                     word_window = word_vocabs[start:end]
                     for pos2, word2 in enumerate(word_window, start):
                         # don't train on the `word` itself
                         if pos2 in range(pos,pos+n): # account for multiple words in ngram
+                            #for _ in range(n): # run more than once for n-grams
                             train_sg_pair(model, model.wv.index2word[word.index], word2.index, alpha)
             result += len(word_vocabs)
         return result
@@ -188,17 +195,29 @@ except ImportError:
         """
         result = 0
         for sentence in sentences:
-            word_vocabs = [model.wv.vocab[w] for w in sentence if w in model.wv.vocab and
-                           model.wv.vocab[w].sample_int > model.random.rand() * 2**32]
+            words = [w for w in sentence if w in model.wv.vocab and
+                     model.wv.vocab[w].sample_int > model.random.rand() * 2**32]
+            word_vocabs = [model.wv.vocab[w] for w in words]
+            sentence_end = len(word_vocabs)
             for pos, word in enumerate(word_vocabs):
                 reduced_window = model.random.randint(model.window)  # `b` in the original word2vec code
                 start = max(0, pos - model.window + reduced_window)
-                window_pos = enumerate(word_vocabs[start:(pos + model.window + 1 - reduced_window)], start)
-                word2_indices = [word2.index for pos2, word2 in window_pos if (word2 is not None and pos2 != pos)]
-                l1 = np_sum(model.wv.syn0[word2_indices], axis=0)  # 1 x vector_size
-                if word2_indices and model.cbow_mean:
-                    l1 /= len(word2_indices)
-                train_cbow_pair(model, word, word2_indices, l1, alpha)
+                for n in range(1,model.max_ngram+1):
+                    if pos+n > sentence_end:
+                        break
+                    if n > 1:
+                        str_word = '_'.join(words[start:start+n]) # make ngram
+                        if str_word in model.wv.vocab: # check if its in vocab
+                            word =  model.wv.vocab[str_word] 
+                        else:
+                            continue # if not, continue
+                    end = pos + model.window + 1 - reduced_window + (n - 1) # extend end window
+                    window_pos = enumerate(word_vocabs[start:end], start)
+                    word2_indices = [word2.index for pos2, word2 in window_pos if (word2 is not None and pos2 != pos)]
+                    l1 = np_sum(model.wv.syn0[word2_indices], axis=0)  # 1 x vector_size
+                    if word2_indices and model.cbow_mean:
+                        l1 /= len(word2_indices)
+                    train_cbow_pair(model, word, word2_indices, l1, alpha)
             result += len(word_vocabs)
         return result
 
@@ -583,14 +602,14 @@ class Word2Vec(utils.SaveLoad):
                             sentence_no, sum(itervalues(vocab)) + total_words, len(vocab))
             sentence_end = len(sentence)            
             for i, word in enumerate(sentence):                
-                for n in range(1,self.max_ngram+1):
-                    #print(n)
+                for n in range(1,self.max_ngram+1):                    
                     if i+n > sentence_end:
                         break
                     if n > 1:
                         word = '_'.join(sentence[i:i+n])
                         #print(word)
                     vocab[word] += 1
+                    
 
             if self.max_vocab_size and len(vocab) > self.max_vocab_size:
                 total_words += utils.prune_vocab(vocab, min_reduce, trim_rule=trim_rule)
